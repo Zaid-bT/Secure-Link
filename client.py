@@ -53,28 +53,30 @@ class Client:
         threading.Thread(target=self._recv_loop, daemon=True).start()
 
     # ---------- helpers ----------
-    def out(self, text):
+    def out(self, text): #everything printed to console is also appended to self.inbox for testing purposes
         self.inbox.append(text)
         if not self.quiet:
             print(text, flush=True)
 
-    def _send(self, mtype, to, data):
+    def _send(self, mtype, to, data): #every outgoing msg is sent through this function 
+        #builds the standard msg format under write lock
         with self.wlock:
             send_msg(self.sock, {"type": mtype, "from": self.name, "to": to, "data": data})
 
-    def pubkey_of(self, user):
+    def pubkey_of(self, user): #searches user by username and returns the public key if found
         with self.slock:
             for u in self.users:
                 if u["username"] == user:
                     return u["pubkey"]
         return None
 
-    def dm_key(self, user, wait=False):
+    def dm_key(self, user, wait=False): #returns the Fernet key for talking to a given user
         for _ in range(15 if wait else 1):                # user list may lag behind a message
             pk = self.pubkey_of(user)
+            #looks up user public key, if found computes the Fernet key and caches it for future use
             if pk:
                 if pk not in self.dm_cache:
-                    self.dm_cache[pk] = derive_dm_fernet(self.priv, pk)   # F4
+                    self.dm_cache[pk] = derive_dm_fernet(self.priv, pk)   # F4 
                 return self.dm_cache[pk]
             time.sleep(0.2)
         return None
