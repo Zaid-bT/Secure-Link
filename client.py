@@ -10,6 +10,7 @@ Commands:  <text>              group message (encrypted with group key)
            /send <user> <file> encrypted file transfer
            /quit
 """
+
 import base64
 import json
 import os
@@ -25,25 +26,26 @@ from crypto_utils import (decrypt, derive_dm_fernet, encrypt, fingerprint,
                           generate_keypair)
 from protocol import recv_msg, send_msg
 
-TTL = 300            # reject Fernet tokens older than 5 min (replay protection, F7)
-CHUNK = 32 * 1024    # file chunk size (bytes)
+TTL = 300 #reject Fernet tokens older than 5 min (replay protection, F7)
+CHUNK = 32 * 1024 #file chunk size 32KBs
 
 
 class Client:
-    def __init__(self, name, host="127.0.0.1", port=5000, quiet=False):
+    def __init__(self, name, host="127.0.0.1", port=5000, quiet=False): #client constructor
         self.name, self.quiet = name, quiet
-        self.sock = socket.create_connection((host, port))
+        self.sock = socket.create_connection((host, port))# host and port default to local server
         self.priv, self.pub = generate_keypair()          # F3: private key stays in memory only
-        self.users = []                                   # [{"username","pubkey"}] in join order
-        self.dm_cache = {}                                # pubkey -> Fernet
+        self.users = []                                   # [{"username","pubkey"}] in join order (latest users list from server)
+        self.dm_cache = {}                                # pubkey -> Fernet (DM key computed only once per user)
         self.group_keys = {}                              # version -> Fernet
-        self.cur_ver = 0
+        self.cur_ver = 0                                  # group key version (F10: oldest member rotates the group key on every join/leave)
         self.pending = []                                 # group msgs waiting for a key
-        self.files = {}                                   # transfer id -> partial file
+        self.files = {}                                   # partially received file trasnfers, keyed by transfer ID
         self.inbox = []                                   # every line printed (used by tests)
-        self.wlock = threading.Lock()
-        self.slock = threading.RLock()
+        self.wlock = threading.Lock()                     # writing to socket lock
+        self.slock = threading.RLock()                    # state lock (users, dm_cache, group_keys, cur_ver, pending, files)
         self.running = True
+        #registration to server with username, public key and role(user/sniffer) 
         self._send("register", "server", {"pubkey": self.pub, "role": "user"})
         reply = recv_msg(self.sock)
         if not reply or reply["type"] != "register_ok":
