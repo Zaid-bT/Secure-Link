@@ -82,7 +82,7 @@ class Client:
         return None
 
     # ---------- receive side ----------
-    def _recv_loop(self):
+    def _recv_loop(self): #which type of msg is received and corresponding handler
         try:
             while self.running:
                 msg = recv_msg(self.sock)
@@ -106,11 +106,12 @@ class Client:
         if self.running:
             self.out("[!] disconnected from server")
 
-    def on_user_list(self, users):
+
+    def on_user_list(self, users): #how client learns who is online and leave/join
         with self.slock:
             old = {u["username"] for u in self.users}
             self.users = users
-            new = {u["username"] for u in users}
+            new = {u["username"] for u in users} #builds new user list so B's public key can be used by A
         for n in sorted(new - old - {self.name}):
             self.out(f"[+] {n} joined")
         for n in sorted(old - new):
@@ -148,13 +149,14 @@ class Client:
         for m in waiting:
             self.on_group(m)
 
-    def on_dm(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
-        raw = f and decrypt(f, msg["data"], TTL)
+    def on_dm(self, msg): 
+        f = self.dm_key(msg["from"], wait=True) #fetches the shared key  
+        raw = f and decrypt(f, msg["data"], TTL) ##decrypts() returns plaintext bytes+integrity check
         if raw is None:                                    # F7
+            #covers all cases(alteration, TTL expired, wrong/no key)
             self.out(f"[!] WARNING: DM from {msg['from']} failed integrity check - DISCARDED")
         else:
-            self.out(f"[DM {msg['from']}] {raw.decode()}")
+            self.out(f"[DM {msg['from']}] {raw.decode()}") #decode(): bytes to sting and print 
 
     def on_group(self, msg):
         ver, token = msg["data"]["ver"], msg["data"]["token"]
@@ -171,7 +173,7 @@ class Client:
 
     def on_file_chunk(self, msg):
         f = self.dm_key(msg["from"], wait=True)
-        raw = f and decrypt(f, msg["data"], TTL)
+        raw = f and decrypt(f, msg["data"], TTL) 
         if raw is None:
             self.out(f"[!] WARNING: file chunk from {msg['from']} failed integrity check - DISCARDED")
             return
@@ -200,11 +202,11 @@ class Client:
         self.out(f"[GROUP me] {text}")
 
     def send_dm(self, user, text):
-        f = self.dm_key(user)
+        f = self.dm_key(user) #fetches the Fernet key for talking to a given user
         if not f:
-            self.out(f"[!] user '{user}' is not online")
+            self.out(f"[!] user '{user}' is not online") #no key found
             return
-        self._send("dm", user, encrypt(f, text.encode()))
+        self._send("dm", user, encrypt(f, text.encode())) #produces a Fernet token with the plaintext message and sends it to the server
         self.out(f"[DM me -> {user}] {text}")
 
     def send_file(self, user, path):
@@ -224,11 +226,11 @@ class Client:
             self._send("file_chunk", user, encrypt(f, json.dumps(chunk).encode()))
         self.out(f"[FILE] sent '{os.path.basename(path)}' to {user} in {total} encrypted chunk(s)")
 
-    def handle_input(self, line):
+    def handle_input(self, line): #command parser 
         line = line.strip()
         if not line:
-            return True
-        if not line.startswith("/"):
+            return True #empty lines ignored
+        if not line.startswith("/"):  #anything that doesn't start with / is treated as a group message.
             self.send_group(line)
             return True
         parts = line.split(" ", 2)
@@ -256,7 +258,7 @@ class Client:
             self.out("Commands: /dm <user> <msg> | /users | /fingerprint [user] | /send <user> <file> | /quit")
         return True
 
-    def close(self):
+    def close(self): #clean shut down
         self.running = False
         try:
             self.sock.shutdown(socket.SHUT_RDWR)   # unblocks the receive thread and tells the server
@@ -273,7 +275,7 @@ if __name__ == "__main__":
                int(sys.argv[3]) if len(sys.argv) > 3 else 5000)
     print(f"Connected as {c.name}. Your fingerprint: {fingerprint(c.pub)}")
     print("Type text for group chat, or /dm /users /fingerprint /send /quit")
-    try:
+    try: #separate send and receive paths
         while c.handle_input(input()):
             pass
     except (EOFError, KeyboardInterrupt):
