@@ -275,7 +275,7 @@ if __name__ == "__main__":
                int(sys.argv[3]) if len(sys.argv) > 3 else 5000)
     print(f"Connected as {c.name}. Your fingerprint: {fingerprint(c.pub)}")
     print("Type text for group chat, or /dm /users /fingerprint /send /quit")
-    try: #separate send and receive paths
+    try: #separate send and receive paths as mentioned in proposal
         while c.handle_input(input()):
             pass
     except (EOFError, KeyboardInterrupt):
