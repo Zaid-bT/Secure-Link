@@ -13,7 +13,7 @@ import threading
 from protocol import recv_msg, send_msg
 
 
-def show(m, tag=""):
+def show(m, tag=""): #hacker sees who talks to whom but cant read content
     d = m.get("data")
     tok = d.get("token") if isinstance(d, dict) and "token" in d else d
     print(f"{tag}[{m.get('type')}] {m.get('from')} -> {m.get('to')} | "
@@ -30,7 +30,7 @@ def sniff(host, port):
         m = recv_msg(s)
         if m is None:
             break
-        if m["type"] == "user_list":
+        if m["type"] == "user_list": #this condition will never be true as user list is only broadcast to clients
             print("[user_list] public keys visible: " + ", ".join(u["username"] for u in m["data"]))
         else:
             show(m, "INTERCEPTED ")
@@ -40,14 +40,17 @@ def sniff(host, port):
 def corrupt(tok):
     i = len(tok) // 2
     return tok[:i] + ("A" if tok[i] != "A" else "B") + tok[i + 1:]
+    #HMAC will no longer match even if only one character is changed (receiver decrypt will raise InvalidToken)
+    
 
 
-def pipe(src, dst, tamper):
+def pipe(src, dst, tamper): #read msg, changes it and forwards it
     try:
         while True:
             m = recv_msg(src)
             if m is None:
                 break
+            #only corrupts the four encrypted message types, not the user_list or register messages
             if tamper and m["type"] in ("dm", "group", "file_chunk", "group_key"):
                 show(m, "ORIGINAL  ")
                 if isinstance(m["data"], dict):
@@ -66,7 +69,7 @@ def pipe(src, dst, tamper):
                 pass
 
 
-def proxy(lport, host, port):
+def proxy(lport, host, port): #acts as a fake server and fake client
     ls = socket.socket()
     ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ls.bind(("0.0.0.0", lport))
@@ -74,7 +77,7 @@ def proxy(lport, host, port):
     print(f"Tampering proxy on :{lport} -> {host}:{port}")
     while True:
         c, _ = ls.accept()
-        s = socket.create_connection((host, port))
+        s = socket.create_connection((host, port)) #for each client it opens its own connection to the real server on 5000
         threading.Thread(target=pipe, args=(c, s, True), daemon=True).start()   # client->server: tamper
         threading.Thread(target=pipe, args=(s, c, False), daemon=True).start()  # server->client: pass
 
