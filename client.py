@@ -122,7 +122,7 @@ class Client:
 
     def rotate_group_key(self):
         with self.slock:
-            ver = self.cur_ver + 1
+            ver = self.cur_ver + 1 #every join/leaves creates a new key version 
             key = Fernet.generate_key()
             self.group_keys[ver] = Fernet(key)
             self.cur_ver = ver
@@ -131,19 +131,19 @@ class Client:
         for m in members:                                  # each copy encrypted with that member's DM key
             f = self.dm_key(m)
             if f:
-                self._send("group_key", m, encrypt(f, payload))
-        self.out(f"[*] group key rotated -> v{ver}, sent to {len(members)} member(s)")
+                self._send("group_key", m, encrypt(f, payload)) #for each member, encrypt the new group key with their DM key and send it to them
+        self.out(f"[*] group key rotated -> v{ver}, sent to {len(members)} member(s)") 
 
     def on_group_key(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
+        f = self.dm_key(msg["from"], wait=True) #same as  on_dm()
         raw = f and decrypt(f, msg["data"], TTL)
         if raw is None:
             self.out(f"[!] WARNING: bad group key from {msg['from']} (ignored)")
             return
         d = json.loads(raw)
         with self.slock:
-            self.group_keys[d["ver"]] = Fernet(d["key"].encode())
-            self.cur_ver = max(self.cur_ver, d["ver"])
+            self.group_keys[d["ver"]] = Fernet(d["key"].encode()) #stores the key unders its version
+            self.cur_ver = max(self.cur_ver, d["ver"]) #update current version to max/latest version                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
             waiting, self.pending = self.pending, []
         self.out(f"[*] received group key v{d['ver']} from {msg['from']}")
         for m in waiting:
@@ -159,7 +159,7 @@ class Client:
             self.out(f"[DM {msg['from']}] {raw.decode()}") #decode(): bytes to sting and print 
 
     def on_group(self, msg):
-        ver, token = msg["data"]["ver"], msg["data"]["token"]
+        ver, token = msg["data"]["ver"], msg["data"]["token"] #read version and looks up matching key
         with self.slock:
             f = self.group_keys.get(ver)
             if f is None:
@@ -167,11 +167,11 @@ class Client:
                 return
         raw = decrypt(f, token, TTL)
         if raw is None:                                    # F7
-            self.out(f"[!] WARNING: group message from {msg['from']} failed integrity check - DISCARDED")
+            self.out(f"[!] WARNING: group message from {msg['from']} failed integrity check - DISCARDED") 
         else:
             self.out(f"[GROUP {msg['from']}] {raw.decode()}")
 
-    def on_file_chunk(self, msg): 
+    def on_file_chunk(self, msg): #about the same functionality as on__dm() 
         f = self.dm_key(msg["from"], wait=True) #get key
         raw = f and decrypt(f, msg["data"], TTL) #decryption and integrity check
         if raw is None:
@@ -192,14 +192,15 @@ class Client:
             self.out(f"[FILE] received '{ent['name']}' from {msg['from']} -> saved to {path}")
 
     # ---------- send side / commands ----------
-    def send_group(self, text):
+    def send_group(self, text):                                                                 
         with self.slock:
-            f = self.group_keys.get(self.cur_ver)
+            f = self.group_keys.get(self.cur_ver) #reads currrent grp key and version 
             ver = self.cur_ver
         if f is None:
             self.out("[!] no group key yet, try again in a second")
             return
-        self._send("group", "*", {"ver": ver, "token": encrypt(f, text.encode())})
+        self._send("group", "*", {"ver": ver, "token": encrypt(f, text.encode())}) #encrypts the plaintext message with the current group key and sends it to the server
+        #The version number is sent in the clear, outside the encrypted token. That is deliberate, because the receiver needs it to pick the right key before decrypting.
         self.out(f"[GROUP me] {text}")
 
     def send_dm(self, user, text):
