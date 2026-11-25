@@ -171,16 +171,17 @@ class Client:
         else:
             self.out(f"[GROUP {msg['from']}] {raw.decode()}")
 
-    def on_file_chunk(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
-        raw = f and decrypt(f, msg["data"], TTL) 
+    def on_file_chunk(self, msg): 
+        f = self.dm_key(msg["from"], wait=True) #get key
+        raw = f and decrypt(f, msg["data"], TTL) #decryption and integrity check
         if raw is None:
             self.out(f"[!] WARNING: file chunk from {msg['from']} failed integrity check - DISCARDED")
             return
         c = json.loads(raw)
-        ent = self.files.setdefault(c["id"], {"name": os.path.basename(c["name"]),
+        #self.files: holds in progress file transfers
+        ent = self.files.setdefault(c["id"], {"name": os.path.basename(c["name"]), #whole basename of the files keeps if safe from path traversal attack
                                               "total": c["total"], "parts": {}})
-        ent["parts"][c["idx"]] = base64.b64decode(c["b64"])
+        ent["parts"][c["idx"]] = base64.b64decode(c["b64"]) 
         if len(ent["parts"]) == ent["total"]:
             os.makedirs("received", exist_ok=True)
             path = os.path.join("received", f"{msg['from']}_{ent['name']}")
@@ -212,17 +213,17 @@ class Client:
     def send_file(self, user, path):
         f = self.dm_key(user)
         if not f:
-            self.out(f"[!] user '{user}' is not online")
+            self.out(f"[!] user '{user}' is not online") #key not found
             return
         if not os.path.isfile(path):
-            self.out(f"[!] file not found: {path}")
+            self.out(f"[!] file not found: {path}") #check file existense 
             return
-        data = open(path, "rb").read()
+        data = open(path, "rb").read() #rb: reads in binary, allows for any file type (text, image, video, etc.)
         total = max(1, -(-len(data) // CHUNK))
-        tid = uuid.uuid4().hex
+        tid = uuid.uuid4().hex #unique transfer ID for this file transfer
         for i in range(total):
             chunk = {"id": tid, "name": os.path.basename(path), "idx": i, "total": total,
-                     "b64": base64.b64encode(data[i * CHUNK:(i + 1) * CHUNK]).decode()}
+                     "b64": base64.b64encode(data[i * CHUNK:(i + 1) * CHUNK]).decode()} #raw byte to text as JSON cannot handle raw bytes, b64encode() encodes bytes to base64, decode() converts bytes to string
             self._send("file_chunk", user, encrypt(f, json.dumps(chunk).encode()))
         self.out(f"[FILE] sent '{os.path.basename(path)}' to {user} in {total} encrypted chunk(s)")
 
