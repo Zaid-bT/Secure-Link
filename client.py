@@ -30,21 +30,22 @@ CHUNK = 32 * 1024    # file chunk size (bytes)
 
 
 class Client:
-    def __init__(self, name, host="127.0.0.1", port=5000, quiet=False, on_event=None):
+    def __init__(self, name, host="127.0.0.1", port=5000, quiet=False, on_event=None): #client constructor
         self.name, self.quiet = name, quiet
         self.on_event = on_event                          # GUI hook: on_event(kind, **data)
-        self.sock = socket.create_connection((host, port))
+        self.sock = socket.create_connection((host, port))# host and port default to local server
         self.priv, self.pub = generate_keypair()          # F3: private key stays in memory only
-        self.users = []                                   # [{"username","pubkey"}] in join order
-        self.dm_cache = {}                                # pubkey -> Fernet
+        self.users = []                                   # [{"username","pubkey"}] in join order (latest users list from server)
+        self.dm_cache = {}                                # pubkey -> Fernet (DM key computed only once per user)
         self.group_keys = {}                              # version -> Fernet
-        self.cur_ver = 0
+        self.cur_ver = 0                                  # group key version (F10: oldest member rotates the group key on every join/leave)
         self.pending = []                                 # group msgs waiting for a key
         self.files = {}                                   # transfer id -> partial file
         self.inbox = []                                   # every line printed (used by tests)
-        self.wlock = threading.Lock()
-        self.slock = threading.RLock()
+        self.wlock = threading.Lock()                     # writing to socket lock
+        self.slock = threading.RLock()                    # state lock (users, dm_cache, group_keys, cur_ver, pending, files)
         self.running = True
+        #registration to server with username, public key and role(user/sniffer) 
         self._send("register", "server", {"pubkey": self.pub, "role": "user"})
         reply = recv_msg(self.sock)
         if not reply or reply["type"] != "register_ok":
@@ -52,7 +53,7 @@ class Client:
         threading.Thread(target=self._recv_loop, daemon=True).start()
 
     # ---------- helpers ----------
-    def out(self, text):
+    def out(self, text): #everything printed to console is also appended to self.inbox for testing purposes
         self.inbox.append(text)
         if not self.quiet:
             print(text, flush=True)
@@ -65,20 +66,22 @@ class Client:
         self.out(f"[!] {text}")
         self.emit("warning", text=text, scope=scope, peer=peer)
 
-    def _send(self, mtype, to, data):
+    def _send(self, mtype, to, data): #every outgoing msg is sent through this function 
+        #builds the standard msg format under write lock
         with self.wlock:
             send_msg(self.sock, {"type": mtype, "from": self.name, "to": to, "data": data})
 
-    def pubkey_of(self, user):
+    def pubkey_of(self, user): #searches user by username and returns the public key if found
         with self.slock:
             for u in self.users:
                 if u["username"] == user:
                     return u["pubkey"]
         return None
 
-    def dm_key(self, user, wait=False):
+    def dm_key(self, user, wait=False): #returns the Fernet key for talking to a given user
         for _ in range(15 if wait else 1):                # user list may lag behind a message
             pk = self.pubkey_of(user)
+            #looks up user public key, if found computes the Fernet key and caches it for future use
             if pk:
                 if pk not in self.dm_cache:
                     self.dm_cache[pk] = derive_dm_fernet(self.priv, pk)   # F4
@@ -87,7 +90,7 @@ class Client:
         return None
 
     # ---------- receive side ----------
-    def _recv_loop(self):
+    def _recv_loop(self): #which type of msg is received and corresponding handler
         try:
             while self.running:
                 msg = recv_msg(self.sock)
@@ -113,11 +116,11 @@ class Client:
             self.out("[!] disconnected from server")
             self.emit("disconnected")
 
-    def on_user_list(self, users):
+    def on_user_list(self, users): #how client learns who is online and leave/join
         with self.slock:
             old = {u["username"] for u in self.users}
             self.users = users
-            new = {u["username"] for u in users}
+            new = {u["username"] for u in users} #builds new user list so B's public key can be used by A
         for n in sorted(new - old - {self.name}):
             self.out(f"[+] {n} joined")
             self.emit("system", text=f"{n} joined the chat")
@@ -131,7 +134,7 @@ class Client:
 
     def rotate_group_key(self):
         with self.slock:
-            ver = self.cur_ver + 1
+            ver = self.cur_ver + 1 #every join/leaves creates a new key version 
             key = Fernet.generate_key()
             self.group_keys[ver] = Fernet(key)
             self.cur_ver = ver
@@ -140,37 +143,38 @@ class Client:
         for m in members:                                  # each copy encrypted with that member's DM key
             f = self.dm_key(m)
             if f:
-                self._send("group_key", m, encrypt(f, payload))
+                self._send("group_key", m, encrypt(f, payload)) #for each member, encrypt the new group key with their DM key and send it to them
         self.out(f"[*] group key rotated -> v{ver}, sent to {len(members)} member(s)")
         self.emit("key", ver=ver, text=f"Group key rotated to v{ver} and sent to {len(members)} member(s)")
 
     def on_group_key(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
+        f = self.dm_key(msg["from"], wait=True) #same as  on_dm()
         raw = f and decrypt(f, msg["data"], TTL)
         if raw is None:
             self.warn(f"WARNING: bad group key from {msg['from']} (ignored)")
             return
         d = json.loads(raw)
         with self.slock:
-            self.group_keys[d["ver"]] = Fernet(d["key"].encode())
-            self.cur_ver = max(self.cur_ver, d["ver"])
+            self.group_keys[d["ver"]] = Fernet(d["key"].encode()) #stores the key unders its version
+            self.cur_ver = max(self.cur_ver, d["ver"]) #update current version to max/latest version
             waiting, self.pending = self.pending, []
         self.out(f"[*] received group key v{d['ver']} from {msg['from']}")
         self.emit("key", ver=d["ver"], text=f"Received group key v{d['ver']} from {msg['from']}")
         for m in waiting:
             self.on_group(m)
 
-    def on_dm(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
-        raw = f and decrypt(f, msg["data"], TTL)
+    def on_dm(self, msg): 
+        f = self.dm_key(msg["from"], wait=True) #fetches the shared key  
+        raw = f and decrypt(f, msg["data"], TTL) ##decrypts() returns plaintext bytes+integrity check
         if raw is None:                                    # F7
+            #covers all cases(alteration, TTL expired, wrong/no key)
             self.warn(f"WARNING: DM from {msg['from']} failed integrity check - DISCARDED", "dm", msg["from"])
         else:
-            self.out(f"[DM {msg['from']}] {raw.decode()}")
+            self.out(f"[DM {msg['from']}] {raw.decode()}") #decode(): bytes to sting and print 
             self.emit("dm_msg", peer=msg["from"], sender=msg["from"], text=raw.decode(), mine=False)
 
     def on_group(self, msg):
-        ver, token = msg["data"]["ver"], msg["data"]["token"]
+        ver, token = msg["data"]["ver"], msg["data"]["token"] #read version and looks up matching key
         with self.slock:
             f = self.group_keys.get(ver)
             if f is None:
@@ -183,14 +187,15 @@ class Client:
             self.out(f"[GROUP {msg['from']}] {raw.decode()}")
             self.emit("group_msg", sender=msg["from"], text=raw.decode(), mine=False)
 
-    def on_file_chunk(self, msg):
-        f = self.dm_key(msg["from"], wait=True)
-        raw = f and decrypt(f, msg["data"], TTL)
+    def on_file_chunk(self, msg): #about the same functionality as on__dm() 
+        f = self.dm_key(msg["from"], wait=True) #get key
+        raw = f and decrypt(f, msg["data"], TTL) #decryption and integrity check
         if raw is None:
             self.warn(f"WARNING: file chunk from {msg['from']} failed integrity check - DISCARDED", "dm", msg["from"])
             return
         c = json.loads(raw)
-        ent = self.files.setdefault(c["id"], {"name": os.path.basename(c["name"]),
+        #self.files: holds in progress file transfers
+        ent = self.files.setdefault(c["id"], {"name": os.path.basename(c["name"]), #whole basename of the files keeps if safe from path traversal attack
                                               "total": c["total"], "parts": {}})
         ent["parts"][c["idx"]] = base64.b64decode(c["b64"])
         if len(ent["parts"]) == ent["total"]:
@@ -207,48 +212,49 @@ class Client:
     # ---------- send side / commands ----------
     def send_group(self, text):
         with self.slock:
-            f = self.group_keys.get(self.cur_ver)
+            f = self.group_keys.get(self.cur_ver) #reads currrent grp key and version 
             ver = self.cur_ver
         if f is None:
             self.warn("No group key yet, try again in a second", "group")
             return
-        self._send("group", "*", {"ver": ver, "token": encrypt(f, text.encode())})
+        self._send("group", "*", {"ver": ver, "token": encrypt(f, text.encode())}) #encrypts the plaintext message with the current group key and sends it to the server
+        #The version number is sent in the clear, outside the encrypted token. That is deliberate, because the receiver needs it to pick the right key before decrypting.
         self.out(f"[GROUP me] {text}")
         self.emit("group_msg", sender=self.name, text=text, mine=True)
 
     def send_dm(self, user, text):
-        f = self.dm_key(user)
+        f = self.dm_key(user) #fetches the Fernet key for talking to a given user
         if not f:
-            self.warn(f"User '{user}' is not online", "dm", user)
+            self.warn(f"User '{user}' is not online", "dm", user) #no key found
             return
-        self._send("dm", user, encrypt(f, text.encode()))
+        self._send("dm", user, encrypt(f, text.encode())) #produces a Fernet token with the plaintext message and sends it to the server
         self.out(f"[DM me -> {user}] {text}")
         self.emit("dm_msg", peer=user, sender=self.name, text=text, mine=True)
 
     def send_file(self, user, path):
         f = self.dm_key(user)
         if not f:
-            self.warn(f"User '{user}' is not online", "dm", user)
+            self.warn(f"User '{user}' is not online", "dm", user) #key not found
             return
-        if not os.path.isfile(path):
+        if not os.path.isfile(path): #check file existense 
             self.warn(f"File not found: {path}", "dm", user)
             return
-        data = open(path, "rb").read()
+        data = open(path, "rb").read() #rb: reads in binary, allows for any file type (text, image, video, etc.)
         total = max(1, -(-len(data) // CHUNK))
-        tid = uuid.uuid4().hex
+        tid = uuid.uuid4().hex #unique transfer ID for this file transfer
         for i in range(total):
             chunk = {"id": tid, "name": os.path.basename(path), "idx": i, "total": total,
-                     "b64": base64.b64encode(data[i * CHUNK:(i + 1) * CHUNK]).decode()}
+                     "b64": base64.b64encode(data[i * CHUNK:(i + 1) * CHUNK]).decode()} #raw byte to text as JSON cannot handle raw bytes, b64encode() encodes bytes to base64, decode() converts bytes to string
             self._send("file_chunk", user, encrypt(f, json.dumps(chunk).encode()))
         self.out(f"[FILE] sent '{os.path.basename(path)}' to {user} in {total} encrypted chunk(s)")
         self.emit("file", peer=user, text=f"\U0001F4CE {os.path.basename(path)}  (sent in {total} encrypted chunk(s))",
                   mine=True, path=None, sender=self.name)
 
-    def handle_input(self, line):
+    def handle_input(self, line): #command parser 
         line = line.strip()
         if not line:
-            return True
-        if not line.startswith("/"):
+            return True #empty lines ignored
+        if not line.startswith("/"):  #anything that doesn't start with / is treated as a group message.
             self.send_group(line)
             return True
         parts = line.split(" ", 2)
@@ -276,7 +282,7 @@ class Client:
             self.out("Commands: /dm <user> <msg> | /users | /fingerprint [user] | /send <user> <file> | /quit")
         return True
 
-    def close(self):
+    def close(self): #clean shut down
         self.running = False
         try:
             self.sock.shutdown(socket.SHUT_RDWR)   # unblocks the receive thread and tells the server
@@ -293,7 +299,7 @@ if __name__ == "__main__":
                int(sys.argv[3]) if len(sys.argv) > 3 else 5000)
     print(f"Connected as {c.name}. Your fingerprint: {fingerprint(c.pub)}")
     print("Type text for group chat, or /dm /users /fingerprint /send /quit")
-    try:
+    try: #separate send and receive paths as mentioned in proposal
         while c.handle_input(input()):
             pass
     except (EOFError, KeyboardInterrupt):
